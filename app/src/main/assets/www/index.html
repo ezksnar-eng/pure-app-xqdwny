@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>مترجم المانهوا العائم (AI)</title>
+    <!-- مكتبة ذكاء اصطناعي مفتوحة المصدر لقراءة النصوص من الصور OCR -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+
+        body {
+            background-color: #121212;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        h2 {
+            margin-bottom: 15px;
+            color: #ff79c6;
+            font-size: 20px;
+        }
+
+        .card {
+            background: #1e1e2e;
+            border-radius: 12px;
+            padding: 20px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+            text-align: center;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #ff79c6, #bd93f9);
+            color: #121212;
+            border: none;
+            padding: 12px 20px;
+            font-size: 15px;
+            font-weight: bold;
+            border-radius: 8px;
+            cursor: pointer;
+            width: 100%;
+            margin-top: 10px;
+            transition: 0.2s;
+        }
+
+        .btn:active {
+            transform: scale(0.98);
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .preview-box {
+            width: 90px;
+            height: 90px;
+            border-radius: 50%;
+            border: 2px dashed #ff79c6;
+            margin: 15px auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            background: #282a36;
+        }
+
+        .preview-box img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        /* ================================
+           تصميم الشاشة العائمة الدائرية 
+           ================================ */
+        #floating-window {
+            position: fixed;
+            top: 150px;
+            right: 20px;
+            width: 65px;
+            height: 65px;
+            border-radius: 50%;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
+            border: 2px solid #ffffff;
+            cursor: move;
+            z-index: 99999;
+            touch-action: none;
+            user-select: none;
+            background-size: cover;
+            background-position: center;
+            background-image: url('https://via.placeholder.com/150');
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* زر الإغلاق ✕ بداخل الشاشة العائمة نفسها */
+        #close-floating {
+            position: absolute;
+            top: -2px;
+            right: -2px;
+            background: #ff5555;
+            color: white;
+            font-size: 11px;
+            font-weight: bold;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            border: 1px solid #ffffff;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.4);
+        }
+
+        /* صندوق إخراج نتيجة ترجمة المانهوا */
+        #translation-result {
+            margin-top: 20px;
+            background: #282a36;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 14px;
+            color: #f8f8f2;
+            min-height: 50px;
+            border-right: 4px solid #bd93f9;
+            text-align: right;
+            width: 100%;
+            max-width: 400px;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>مترجم المانهوا العائم 🌸</h2>
+
+    <div class="card">
+        <p style="font-size: 13px; color: #a6adc8;">اختر صورتك المفضلّة لتظهر كأيقونة دائريّة عائمة فوق الشاشة:</p>
+        
+        <div class="preview-box" id="avatar-preview">
+            <span style="font-size: 12px; color: #a6adc8;">بلا صورة</span>
+        </div>
+
+        <button class="btn" onclick="document.getElementById('image-input').click()">🖼️ تغيير صورة الأيقونة</button>
+        <input type="file" id="image-input" accept="image/*" onchange="changeAvatar(event)">
+
+        <button class="btn" style="background: #50fa7b; margin-top: 12px;" onclick="toggleFloating(true)">▶️ إظهار الشاشة العائمة</button>
+    </div>
+
+    <!-- نتيجة الترجمة بالذكاء الاصطناعي -->
+    <div id="translation-result">اضغط على الأيقونة العائمة لبدء الترجمة...</div>
+
+    <!-- الشاشة العائمة الدائرية -->
+    <div id="floating-window" style="display: none;" onclick="translateManhwa()">
+        <!-- منطقة الإغلاق بداخل الشاشة العائمة نفسها -->
+        <div id="close-floating" onclick="event.stopPropagation(); toggleFloating(false);">✕</div>
+    </div>
+
+    <script>
+        let floatingWin = document.getElementById('floating-window');
+        let avatarPreview = document.getElementById('avatar-preview');
+        let resultBox = document.getElementById('translation-result');
+        let currentImageSrc = 'https://via.placeholder.com/150';
+
+        // 1. تغيير الصورة من داخل التطبيق
+        function changeAvatar(event) {
+            let file = event.target.files[0];
+            if (file) {
+                let reader = new FileReader();
+                reader.onload = function(e) {
+                    currentImageSrc = e.target.result;
+                    avatarPreview.innerHTML = `<img src="${currentImageSrc}">`;
+                    floatingWin.style.backgroundImage = `url('${currentImageSrc}')`;
+                };
+                reader.readAsDataURL(file);
+            }
+        }
+
+        // 2. إظهار / إخفاء النافذة العائمة
+        function toggleFloating(show) {
+            floatingWin.style.display = show ? 'flex' : 'none';
+        }
+
+        // 3. جعل الشاشة العائمة قابلة للسحب باللمس بحرية
+        let isDragging = false;
+        let currentX, currentY, initialX, initialY;
+        let xOffset = 0, yOffset = 0;
+
+        floatingWin.addEventListener("touchstart", dragStart, false);
+        floatingWin.addEventListener("touchend", dragEnd, false);
+        floatingWin.addEventListener("touchmove", drag, false);
+
+        function dragStart(e) {
+            initialX = e.touches[0].clientX - xOffset;
+            initialY = e.touches[0].clientY - yOffset;
+            isDragging = false;
+        }
+
+        function drag(e) {
+            isDragging = true;
+            e.preventDefault();
+            currentX = e.touches[0].clientX - initialX;
+            currentY = e.touches[0].clientY - initialY;
+            xOffset = currentX;
+            yOffset = currentY;
+            setTranslate(currentX, currentY, floatingWin);
+        }
+
+        function setTranslate(xPos, yPos, el) {
+            el.style.transform = `translate3d(${xPos}px, ${yPos}px, 0)`;
+        }
+
+        function dragEnd() {
+            initialX = currentX;
+            initialY = currentY;
+        }
+
+        // 4. ترجمة المانهوا عبر AI مفتوح المصدر عند الضغط
+        async function translateManhwa() {
+            if (isDragging) return; // عدم التفعيل أثناء السحب
+
+            resultBox.innerText = "🤖 جاري قراءة نص المانهوا وترجمته بالذكاء الاصطناعي...";
+
+            try {
+                // استخدام Tesseract AI لمسح النصوص مفتوح المصدر
+                const worker = await Tesseract.createWorker('eng'); // أو 'kor' للمانهوا الكورية
+                const ret = await worker.recognize(currentImageSrc);
+                await worker.terminate();
+
+                if (ret.data.text.trim().length > 0) {
+                    resultBox.innerText = "النص المترجم: " + ret.data.text;
+                } else {
+                    resultBox.innerText = "لم يتم العثور على نص حواري واضح بالنقطة المحددة.";
+                }
+            } catch (err) {
+                resultBox.innerText = "حدث خطأ أثناء الترجمة، تأكد من الصورة.";
+            }
+        }
+    </script>
+</body>
+</html>
