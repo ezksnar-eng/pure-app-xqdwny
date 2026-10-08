@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html,body{margin:0;height:100%;background:#000;color:#fff;font-family:-apple-system,Roboto,sans-serif}
+  body{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px;box-sizing:border-box}
+  .v{width:84px;height:84px;border-radius:22px;background:radial-gradient(circle at 50% 60%,#3b1d6e,#08060f 70%);display:flex;align-items:center;justify-content:center;margin-bottom:20px;box-shadow:0 0 40px rgba(124,58,237,.35)}
+  h1{font-size:22px;margin:0 0 8px}
+  p{color:#aaa;margin:0 0 24px;font-size:15px;line-height:1.7}
+  button{background:linear-gradient(135deg,#a78bfa,#ec4899);border:0;border-radius:14px;color:#fff;font-size:16px;font-weight:600;padding:14px 32px}
+</style>
+</head>
+<body>
+  <div class="v">
+    <svg width="46" height="46" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a78bfa"/><stop offset="1" stop-color="#ec4899"/></linearGradient></defs><polygon points="6,12 22,12 32,32 42,12 58,12 32,56" fill="url(#g)"/></svg>
+  </div>
+  <h1>تعذّر الاتصال بفيرون</h1>
+  <p>تأكد من الإنترنت ثم أعد المحاولة.</p>
+  <button onclick="VeronApp.retry()">إعادة المحاولة</button>
+</body>
+</html>
