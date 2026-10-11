@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <!-- ضع هنا رابط موقع فيرون بعد ما ترفعه (https فقط) -->
-    <string name="veron_url" translatable="false">https://YOUR-VERON-URL.example.com</string>
-</resources>
