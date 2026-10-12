@@ -13,7 +13,9 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
 import android.util.Base64;
+import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.ServiceWorkerClient;
 import android.webkit.ServiceWorkerController;
 import android.webkit.ValueCallback;
@@ -33,6 +35,7 @@ public class MainActivity extends Activity {
     private static final int REQ_FILE = 7;
     private WebView web;
     private ValueCallback<Uri[]> fileCb;
+    private static int crashes = 0;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -67,6 +70,14 @@ public class MainActivity extends Activity {
             public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
                 return loader.shouldInterceptRequest(r.getUrl());
             }
+
+            @Override
+            public boolean onRenderProcessGone(WebView v, RenderProcessGoneDetail d) {
+                // الذاكرة خلصت: بدل ما يطلع التطبيق، نعيد تشغيل الواجهة (النموذج المحمّل ينحفظ بالكاش)
+                if (++crashes > 3) { finish(); return true; }
+                runOnUiThread(() -> recreate());
+                return true;
+            }
         });
         web.setWebChromeClient(new WebChromeClient() {
             @Override
@@ -82,7 +93,7 @@ public class MainActivity extends Activity {
                 return true;
             }
         });
-        if (b != null) web.restoreState(b); else web.loadUrl(HOME);
+        web.loadUrl(HOME);
     }
 
     @Override
@@ -109,6 +120,14 @@ public class MainActivity extends Activity {
     }
 
     class Bridge {
+        @JavascriptInterface
+        public void keepAwake(final boolean on) {
+            runOnUiThread(() -> {
+                if (on) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            });
+        }
+
         @JavascriptInterface
         public void copy(String t) {
             ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);

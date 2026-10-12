@@ -20,7 +20,7 @@
   OFFLOAD=1        تقليل استهلاك VRAM (أبطأ)
   HF_HUB_OFFLINE=1 منع أي اتصال بالنت (بعد ما تتحمل الأوزان)
 """
-import base64, io, json, os, random, re, threading
+import base64, io, json, os, random, re, select, socket, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import torch
@@ -84,10 +84,20 @@ def generator(seed):
     return torch.Generator(device="cpu" if DEVICE == "mps" else DEVICE).manual_seed(seed)
 
 
-def do_generate(b):
+def step_cb(gone):
+    # إذا التطبيق سكّر الاتصال (إيقاف/خروج) نوقف التوليد حتى الكرت ما يبقى مشغول
+    def cb(pipe, step, timestep, kw):
+        if gone():
+            pipe._interrupt = True
+        return kw
+    return cb
+
+
+def do_generate(b, gone=lambda: False):
     w, h = parse_size(b.get("size"))
     with LOCK:
         pipe = get_pipe("gen")
+        pipe._interrupt = False
         with torch.inference_mode():
             out = pipe(
                 prompt=b.get("prompt", ""),
@@ -96,16 +106,18 @@ def do_generate(b):
                 num_inference_steps=int(b.get("num_inference_steps") or 50),
                 true_cfg_scale=float(b.get("true_cfg_scale") or 4.0),
                 generator=generator(b.get("seed")),
+                callback_on_step_end=step_cb(gone),
             )
     return {"data": [{"b64_json": to_b64(out.images[0])}]}
 
 
-def do_edit(b):
+def do_edit(b, gone=lambda: False):
     imgs = [data_url_to_image(x) for x in (b.get("image") or [])]
     if not imgs:
         raise ValueError("no image")
     with LOCK:
         pipe = get_pipe("edit")
+        pipe._interrupt = False
         with torch.inference_mode():
             out = pipe(
                 image=imgs,
@@ -116,6 +128,7 @@ def do_edit(b):
                 guidance_scale=1.0,
                 num_images_per_prompt=1,
                 generator=generator(b.get("seed")),
+                callback_on_step_end=step_cb(gone),
             )
     return {"data": [{"b64_json": to_b64(out.images[0])}]}
 
@@ -136,6 +149,15 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def gone(self):
+        try:
+            r, _, _ = select.select([self.connection], [], [], 0)
+            if r:
+                return self.connection.recv(1, socket.MSG_PEEK) == b""
+        except Exception:
+            return True
+        return False
+
     def do_OPTIONS(self):
         self.send_response(204)
         self._cors()
@@ -152,9 +174,9 @@ class H(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(n) or b"{}")
             if self.path.startswith("/v1/images/generations"):
-                self._json(200, do_generate(body))
+                self._json(200, do_generate(body, self.gone))
             elif self.path.startswith("/v1/images/edits"):
-                self._json(200, do_edit(body))
+                self._json(200, do_edit(body, self.gone))
             else:
                 self._json(404, {"error": {"message": "not found"}})
         except Exception as e:
