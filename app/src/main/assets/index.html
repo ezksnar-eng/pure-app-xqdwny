@@ -1125,44 +1125,58 @@ runText=async(...a)=>{
 
 /* ============================== QWEN3 (محلي بالمتصفح) + QWEN-IMAGE (سيرفر محلي) ============================== */
 /* كل نماذج OpenRouter/Whisper/الصوت/الفيديو انشالت. المتبقي: Qwen3 للدردشة (WebLLM/WebGPU، يشتغل بدون نت بعد أول تحميل) و Qwen-Image للصور. */
-const WEBLLM_URL='https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.79/+esm';
-const QMODELS=[['Qwen3-0.6B-q4f16_1-MLC','Qwen3 0.6B — أخف شي (~0.5GB)'],['Qwen3-1.7B-q4f16_1-MLC','Qwen3 1.7B — متوازن (~1.2GB)'],['Qwen3-4B-q4f16_1-MLC','Qwen3 4B — أذكى (~2.5GB)'],['Qwen3-8B-q4f16_1-MLC','Qwen3 8B — الأقوى (~5GB، يحتاج كرت قوي)']];
-const qModel=()=>{const m=store.get('qmodel','Qwen3-1.7B-q4f16_1-MLC');return QMODELS.some(x=>x[0]===m)?m:QMODELS[1][0]};
-let ENG=null,ENGID='',ENGLOAD=null,LOADP={t:'',p:0},onLoadP=null;
+const TJS_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6/+esm';
+const QMODELS=[['onnx-community/Qwen3-0.6B-ONNX','Qwen3 0.6B — أخف شي وأسرع (~0.5GB)'],['onnx-community/Qwen3-1.7B-ONNX','Qwen3 1.7B — متوازن (~1.3GB)'],['onnx-community/Qwen3-4B-ONNX','Qwen3 4B — أذكى وأبطأ (~2.8GB)']];
+const qModel=()=>{const m=store.get('qmodel2','onnx-community/Qwen3-1.7B-ONNX');return QMODELS.some(x=>x[0]===m)?m:QMODELS[1][0]};
+let ENG=null,ENGID='',ENGLOAD=null,LOADP={t:'',p:0},onLoadP=null,TL=null;
 function qErr(msg){const e=new Error(msg);e.userMsg=msg;return e}
+/* يجرّب WebGPU أول، وإذا كرت الجوال ما يدعمه (حدود الذاكرة) ينزل تلقائيًا على المعالج (WASM) */
 function ensureEngine(){
   const id=qModel();
   if(ENG&&ENGID===id)return Promise.resolve(ENG);
   if(ENGLOAD)return ENGLOAD;
-  if(!navigator.gpu)return Promise.reject(qErr('متصفحك ما يدعم WebGPU، وهو لازم لتشغيل Qwen3 داخل المتصفح. استخدم Chrome أو Edge حديث (كمبيوتر أو أندرويد).'));
   ENGLOAD=(async()=>{
     try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}
-    let L;try{L=await import(WEBLLM_URL)}catch(e){throw qErr('تعذر تحميل مكتبة التشغيل. أول مرة تحتاج نت، وبعدها يشتغل بدون نت.')}
-    if(!ENG)ENG=new L.MLCEngine();
-    ENG.setInitProgressCallback(r=>{LOADP={t:r.text||'',p:r.progress||0};if(onLoadP)onLoadP(LOADP)});
-    try{await ENG.reload(id)}catch(e){ENGID='';throw qErr('فشل تحميل النموذج: '+String(e.message||e).slice(0,160))}
-    ENGID=id;return ENG;
+    if(!TL){try{TL=await import(TJS_URL)}catch(e){throw qErr('تعذر تحميل مكتبة التشغيل. أول مرة تحتاج نت، وبعدها يشتغل بدون نت.')}}
+    TL.env.allowLocalModels=false;TL.env.useBrowserCache=true;
+    const files={};
+    const cb=p=>{
+      if(p.file&&p.total){files[p.file]={l:p.loaded||0,t:p.total}}
+      let l=0,t=0;for(const k in files){l+=files[k].l;t+=files[k].t}
+      LOADP={t:p.file||'',p:t?l/t:0};if(onLoadP)onLoadP(LOADP);
+    };
+    const pref=store.get('qdev','');
+    const tries=(pref==='wasm'?[['wasm','q4']]:[['webgpu','q4f16'],['wasm','q4']]);
+    let last=null;
+    for(const[dev,dt]of tries){
+      try{
+        if(dev==='webgpu'&&!navigator.gpu)continue;
+        const pipe=await TL.pipeline('text-generation',id,{device:dev,dtype:dt,progress_callback:cb});
+        ENG=pipe;ENGID=id;store.set('qdev',dev);dbg('engine',dev,dt);return ENG;
+      }catch(e){last=e;dbg('engine fail',dev,String(e.message||e).slice(0,120))}
+    }
+    throw qErr('فشل تحميل النموذج: '+String(last&&last.message||'').slice(0,160));
   })();
   const p=ENGLOAD;p.then(()=>{ENGLOAD=null},()=>{ENGLOAD=null});return p;
 }
 const stripThink=s=>s.replace(/<think>[\s\S]*?<\/think>/g,'').replace(/<think>[\s\S]*$/,'').replace(/^\s+/,'');
 async function localChat(messages,onDelta,user,mode,opt={}){
   if(user?.aborted){const u=new Error('user');u.user=true;throw u}
-  onLoadP=r=>{if(!ENG||ENGID!==qModel())onDelta('⏳ جاري تحميل Qwen3 (أول مرة بس)… '+Math.round(r.p*100)+'%')};
-  if(!ENG||ENGID!==qModel())onDelta('⏳ جاري تجهيز Qwen3…');
-  const eng=await ensureEngine();onLoadP=null;
+  const fresh=!ENG||ENGID!==qModel();
+  onLoadP=r=>{if(fresh)onDelta('⏳ جاري تحميل Qwen3 (أول مرة بس)… '+Math.round(r.p*100)+'%')};
+  if(fresh)onDelta('⏳ جاري تجهيز Qwen3…');
+  const pipe=await ensureEngine();onLoadP=null;
   const s=rpS(),rp=!!curPersona()&&mode!=='enh';
-  const params={temperature:opt.temp??(rp?+s.temp:.7),top_p:rp?+s.top_p:.8,max_tokens:opt.max||(rp?+s.max:1500)};
-  if(rp&&+s.rep)params.frequency_penalty=+s.rep;
-  const stop=()=>{try{eng.interruptGenerate()}catch(e){}};
+  const msgs=messages.map(m=>({role:m.role,content:m.content}));
+  for(let i=msgs.length-1;i>=0;i--)if(msgs[i].role==='user'){msgs[i].content+=' /no_think';break}
+  const sc=new TL.InterruptableStoppingCriteria();
+  const stop=()=>{try{sc.interrupt()}catch(e){}};
   user&&user.addEventListener('abort',stop);
   let acc='',shown='';
+  const streamer=new TL.TextStreamer(pipe.tokenizer,{skip_prompt:true,skip_special_tokens:true,callback_function:t=>{
+    acc+=t;const v=stripThink(acc);if(v&&v!==shown){shown=v;onDelta(v)}}});
   try{
-    const it=await eng.chat.completions.create({messages,stream:true,...params,extra_body:{enable_thinking:false}});
-    for await(const ch of it){
-      const d=ch.choices?.[0]?.delta?.content;
-      if(d){acc+=d;const v=stripThink(acc);if(v&&v!==shown){shown=v;onDelta(v)}}
-    }
+    await pipe(msgs,{max_new_tokens:opt.max||(rp?+s.max:1024),do_sample:true,temperature:opt.temp??(rp?+s.temp:.7),top_p:rp?+s.top_p:.8,top_k:20,repetition_penalty:rp&&+s.rep?1+(+s.rep)*.1:1.05,streamer,stopping_criteria:sc});
   }catch(e){
     if(user?.aborted){if(shown)return shown;const u=new Error('user');u.user=true;throw u}
     throw qErr('خطأ من Qwen3: '+String(e.message||e).slice(0,160));
@@ -1186,7 +1200,7 @@ doText=async function(c,lastU,a,intent){
   const hist=c.msgs.filter(m=>m!==a&&m.content).slice(-24);
   const sys={role:'system',content:buildSystem()};
   let used=sys.content.length;const keep=[];
-  for(let i=hist.length-1;i>=0;i--){const n=hist[i].content.length;if(keep.length&&used+n>5200)break;used+=n;keep.unshift({role:hist[i].role,content:hist[i].content.slice(0,5200)})}
+  for(let i=hist.length-1;i>=0;i--){const n=hist[i].content.length;if(keep.length&&used+n>12000)break;used+=n;keep.unshift({role:hist[i].role,content:hist[i].content.slice(0,8000)})}
   const out=await localChat([sys,...keep],acc=>{
     a.content=acc;const el=$('#msgs .m.a:last-child .md');
     if(el){el.innerHTML=md(acc);if(stick)scrollEnd(true)}else renderAll();
@@ -1261,10 +1275,10 @@ openSettings=function(){
   const s=rpS(),ic2=imgCfg(),cur=qModel();
   openSheet('<h3>الإعدادات</h3>'+
    '<div style="color:var(--mut);font-size:13.5px;margin:0 6px 8px">تعليمات مخصصة (تنطبق على كل المحادثات)</div><textarea class="area" id="ciIn" placeholder="مثال: جاوبني بالعراقي وباختصار"></textarea><div class="row2"><button class="btn2 p" id="ciSave">حفظ</button></div>'+
-   '<div class="fl" style="margin-top:24px;font-weight:600;color:var(--tx)">الدردشة — Qwen3 (يشتغل بالمتصفح، بدون نت)</div>'+
+   '<div class="fl" style="margin-top:24px;font-weight:600;color:var(--tx)">الدردشة — Qwen3 (داخل التطبيق، بدون نت)</div>'+
    '<select class="srch" id="qSel">'+QMODELS.map(m=>'<option value="'+m[0]+'"'+(m[0]===cur?' selected':'')+'>'+esc(m[1])+'</option>').join('')+'</select>'+
    '<div class="row2"><button class="btn2 p" id="qLoad">'+(ENG&&ENGID===cur?'النموذج جاهز ✓':'تحميل النموذج الآن')+'</button></div>'+
-   '<div id="qStat" style="color:var(--mut);font-size:12.5px;margin:8px 6px 0;line-height:1.8">يتحمل مرة وحدة (يحتاج نت) وينحفظ بالجهاز، وبعدها يشتغل بدون نت. يحتاج متصفح يدعم WebGPU.</div>'+
+   '<div id="qStat" style="color:var(--mut);font-size:12.5px;margin:8px 6px 0;line-height:1.8">يتحمل مرة وحدة (يحتاج نت) وينحفظ بالجهاز، وبعدها يشتغل بدون نت وبدون سيرفر. إذا كرت جهازك ما يدعم WebGPU يشتغل تلقائيًا على المعالج (أبطأ).</div>'+
    '<div class="fl" style="margin-top:24px;font-weight:600;color:var(--tx)">الصور — Qwen-Image</div>'+
    '<div class="fl">رابط السيرفر المحلي</div><input class="srch" id="imBase" dir="ltr" value="'+esc(ic2.base)+'" placeholder="http://localhost:8000">'+
    R('imSt','عدد الخطوات',ic2.steps,10,60,1)+R('imCfg','قوة الالتزام بالوصف (CFG)',ic2.cfg,1,8,.5)+
@@ -1280,13 +1294,13 @@ $('#btnSettings').onclick=openSettings;
 $('#sheet').addEventListener('click',async e=>{
   const t=e.target.closest('#qLoad,#imTest,#qSave');if(!t)return;
   if(t.id==='qSave'){
-    store.set('qmodel',$('#qSel').value);
+    store.set('qmodel2',$('#qSel').value);
     store.set('img',{base:$('#imBase').value.trim(),steps:+$('#imSt').value,cfg:+$('#imCfg').value,enh:$('#imEn').checked});
     store.set('rp',{temp:+$('#rpT').value,top_p:+$('#rpP').value,rep:+$('#rpF').value,max:Math.max(64,Math.min(4000,+$('#rpM').value||700))});
     toast('تم الحفظ');return;
   }
   if(t.id==='qLoad'){
-    store.set('qmodel',$('#qSel').value);
+    store.set('qmodel2',$('#qSel').value);
     const st=$('#qStat'),btn=t;btn.disabled=true;
     onLoadP=r=>{st.textContent=(r.text||'')+' — '+Math.round(r.p*100)+'%'};
     try{await ensureEngine();st.textContent='جاهز. من هسه يشتغل بدون نت.';btn.textContent='النموذج جاهز ✓'}
