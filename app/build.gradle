@@ -1,48 +1,15 @@
-plugins {
-    id 'com.android.application'
-}
-
+plugins { id 'com.android.application' }
 android {
-    namespace 'com.pure.appxqdwny'
+    namespace 'com.jeron.app'
     compileSdk 34
-
     defaultConfig {
-        applicationId 'com.pure.appxqdwny'
-        minSdk 24
+        applicationId 'com.jeron.app'
+        minSdk 29
         targetSdk 34
-        versionCode 12
-        versionName '1.0.0'
+        versionCode 1
+        versionName '1.0'
     }
-
-    signingConfigs {
-        debug {
-            storeFile file('debug.keystore')
-            storePassword 'android'
-            keyAlias 'androiddebugkey'
-            keyPassword 'android'
-        }
-    }
-
-    buildTypes {
-        debug {
-            signingConfig signingConfigs.debug
-        }
-        release {
-            minifyEnabled false
-            signingConfig signingConfigs.debug
-        }
-    }
-
-    androidResources {
-        ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
-    }
-
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
-    }
+    buildTypes { release { minifyEnabled false } }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
 }
-
-dependencies {
-    implementation 'androidx.webkit:webkit:1.10.0'
-}
+dependencies { implementation 'androidx.webkit:webkit:1.11.0' }
