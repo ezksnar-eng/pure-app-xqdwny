@@ -1126,8 +1126,8 @@ runText=async(...a)=>{
 /* ============================== QWEN3 (محلي بالمتصفح) + QWEN-IMAGE (سيرفر محلي) ============================== */
 /* كل نماذج OpenRouter/Whisper/الصوت/الفيديو انشالت. المتبقي: Qwen3 للدردشة (WebLLM/WebGPU، يشتغل بدون نت بعد أول تحميل) و Qwen-Image للصور. */
 const TJS_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6/+esm';
-const QMODELS=[['onnx-community/Qwen3-0.6B-ONNX','Qwen3 0.6B — أخف شي وأسرع (~0.5GB) — مناسب للجوال'],['onnx-community/Qwen3-1.7B-ONNX','Qwen3 1.7B — متوازن (~1.3GB)'],['onnx-community/Qwen3-4B-ONNX','Qwen3 4B — أذكى وأبطأ (~2.8GB، للأجهزة القوية)']];
-const qModel=()=>{const m=store.get('qmodel2','onnx-community/Qwen3-0.6B-ONNX');return QMODELS.some(x=>x[0]===m)?m:QMODELS[0][0]};
+const QMODELS=[['onnx-community/gemma-3-270m-it-ONNX','Gemma 3 270M — أصغر شي (~0.3GB) — للجوالات الضعيفة'],['HuggingFaceTB/SmolLM2-360M-Instruct','SmolLM2 360M — صغير وخفيف (~0.4GB)'],['onnx-community/Qwen3-0.6B-ONNX','Qwen3 0.6B — أخف شي وأسرع (~0.5GB) — مناسب للجوال'],['onnx-community/Qwen3-1.7B-ONNX','Qwen3 1.7B — متوازن (~1.3GB)'],['onnx-community/Qwen3-4B-ONNX','Qwen3 4B — أذكى وأبطأ (~2.8GB، للأجهزة القوية)']];
+const qModel=()=>{const m=store.get('qmodel2','onnx-community/gemma-3-270m-it-ONNX');return QMODELS.some(x=>x[0]===m)?m:QMODELS[0][0]};
 let ENGID='',W=null,WLOAD=null,GEN=null,LOADP={t:'',p:0},onLoadP=null;
 function qErr(msg){const e=new Error(msg);e.userMsg=msg;return e}
 const abortable=(p,sig)=>sig?new Promise((ok,no)=>{const f=()=>{const u=new Error('user');u.user=true;no(u)};if(sig.aborted)return f();sig.addEventListener('abort',f,{once:true});p.then(ok,no).finally(()=>sig.removeEventListener('abort',f))}):p;
@@ -1220,7 +1220,8 @@ function ensureEngine(){
   if(W&&ENGID&&ENGID!==id){try{W.terminate()}catch(e){}W=null;ENGID='';WLOAD=null}
   try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}
   const pref=store.get('qdev','');
-  const tries=pref==='wasm'?[['wasm','q4']]:[['webgpu','q4f16'],['wasm','q4']];
+  const cpu=store.get('cpuOnly',true);
+  const tries=(cpu||pref==='wasm')?[['wasm','q4'],['wasm','q8']]:[['webgpu','q4f16'],['wasm','q4'],['wasm','q8']];
   let w;try{w=getWorker()}catch(e){return Promise.reject(qErr('تعذر تشغيل المحرك داخل التطبيق.'))}
   const h={id};h.p=new Promise((ok,no)=>{h.ok=ok;h.no=no});h.p.catch(()=>{});
   WLOAD=h;w.postMessage({type:'load',id,tries});return h.p;
@@ -1244,7 +1245,7 @@ function captionImage(dataUrl,user,onStatus){
       else if(m.type==='vloaded'){onStatus&&onStatus('⏳ جاري قراءة الصورة…');w.postMessage({type:'vcap',rid,image:dataUrl,max:300,prompt:'Describe this image in detail. Include any visible text, objects, people, colors and the overall scene.'})}
       else if(m.rid===rid){if(m.type==='vtok')acc+=m.t;else if(m.type==='vdone')fin(null,acc.trim());else if(m.type==='verr')fin(qErr('خطأ بقراءة الصورة: '+String(m.msg).slice(0,140)))}
     };
-    w.postMessage({type:'vload',id:vModel(),devs:store.get('qdev','')==='wasm'?['wasm']:['webgpu','wasm']});
+    w.postMessage({type:'vload',id:vModel(),devs:(store.get('cpuOnly',true)||store.get('qdev','')==='wasm')?['wasm']:['webgpu','wasm']});
   });
 }
 const stripThink=s=>s.replace(/<think>[\s\S]*?<\/think>/g,'').replace(/<think>[\s\S]*$/,'').replace(/^\s+/,'');
@@ -1256,7 +1257,7 @@ async function localChat(messages,onDelta,user,mode,opt={}){
   try{await abortable(ensureEngine(),user)}finally{onLoadP=null}
   const s=rpS(),rp=!!curPersona()&&mode!=='enh';
   const msgs=messages.map(m=>({role:m.role,content:m.content}));
-  for(let i=msgs.length-1;i>=0;i--)if(msgs[i].role==='user'){msgs[i].content+=' /no_think';break}
+  if(/Qwen3/.test(qModel()))for(let i=msgs.length-1;i>=0;i--)if(msgs[i].role==='user'){msgs[i].content+=' /no_think';break}
   const opts={max_new_tokens:opt.max||(rp?+s.max:4096),do_sample:true,temperature:opt.temp??(rp?+s.temp:.7),top_p:rp?+s.top_p:.8,top_k:20,repetition_penalty:rp&&+s.rep?1+(+s.rep)*.1:1.05};
   const rid=uid(),w=W;
   return await new Promise((ok,no)=>{
@@ -1502,7 +1503,7 @@ openSettings=function(){
    H('الدردشة — مصدر النموذج')+srcSel('chSrc',pv.chat.src,[['local','Qwen3 محلي (داخل التطبيق، بدون نت)'],['api','API (نموذج قوي من مزوّد)']])+
    '<div class="fl" style="margin-top:14px">— Qwen3 المحلي —</div>'+
    '<select class="srch" id="qSel">'+QMODELS.map(m=>'<option value="'+m[0]+'"'+(m[0]===cur?' selected':'')+'>'+esc(m[1])+'</option>').join('')+'</select>'+
-   '<div class="row2"><button class="btn2 p" id="qLoad">'+(W&&ENGID===cur?'النموذج جاهز ✓':'تحميل النموذج الآن')+'</button></div>'+
+   '<label class="chk"><input type="checkbox" id="cpuOnly"'+(store.get('cpuOnly',true)?' checked':'')+'> تشغيل على المعالج فقط (أثبت للجوالات الضعيفة مثل Realme 9i)</label><div class="row2"><button class="btn2 p" id="qLoad">'+(W&&ENGID===cur?'النموذج جاهز ✓':'تحميل النموذج الآن')+'</button></div>'+
    '<div id="qStat" style="color:var(--mut);font-size:12.5px;margin:8px 6px 0;line-height:1.8">يتحمل مرة وحدة (يحتاج نت) وينحفظ بالجهاز، وبعدها يشتغل بدون نت وبدون سيرفر.</div>'+
    '<div class="fl" style="margin-top:14px">— قراءة الصور محليًا (بدون API) —</div><select class="srch" id="vSel">'+VLMODELS.map(m=>'<option value="'+m[0]+'"'+(m[0]===vModel()?' selected':'')+'>'+esc(m[1])+'</option>').join('')+'</select><div style="color:var(--mut);font-size:12.5px;margin:6px 6px 0;line-height:1.7">يتحمل أول مرة تسأل عن صورة، وبعدها بدون نت. قراءته للعربي ضعيفة، والأفضل API فيه رؤية للدقة.</div>'+
    '<div class="fl" style="margin-top:14px">— API للدردشة —</div>'+apiFields('ch',pv.chat,PRESETS_C,'مثال: qwen/qwen3-235b-a22b')+
@@ -1527,7 +1528,7 @@ $('#sheet').addEventListener('change',e=>{
 $('#sheet').addEventListener('click',async e=>{
   const t=e.target.closest('#qLoad,#imTest,#qSave');if(!t)return;
   if(t.id==='qSave'){
-    store.set('qmodel2',$('#qSel').value);store.set('vmodel',$('#vSel').value);
+    store.set('qmodel2',$('#qSel').value);store.set('vmodel',$('#vSel').value);store.set('cpuOnly',$('#cpuOnly').checked);
     store.set('img',{base:$('#imBase').value.trim(),steps:+$('#imSt').value,cfg:+$('#imCfg').value,enh:$('#imEn').checked});
     store.set('prov2',{
       chat:{src:$('#chSrc').value,preset:$('#chPre').value,base:$('#chBase').value.trim(),key:cleanKey($('#chKey').value),model:$('#chModel').value.trim()},
@@ -1536,7 +1537,7 @@ $('#sheet').addEventListener('click',async e=>{
     toast('تم الحفظ');return;
   }
   if(t.id==='qLoad'){
-    store.set('qmodel2',$('#qSel').value);
+    store.set('qmodel2',$('#qSel').value);store.set('cpuOnly',$('#cpuOnly').checked);
     const st=$('#qStat'),btn=t;btn.disabled=true;try{AB&&AB.keepAwake&&AB.keepAwake(true)}catch(e){}
     onLoadP=r=>{st.textContent=Math.round(r.p*100)+'% — '+(r.t||'')};
     try{await ensureEngine();st.textContent='جاهز. من هسه يشتغل بدون نت.';btn.textContent='النموذج جاهز ✓'}
