@@ -1156,8 +1156,39 @@ async function gen(m){
   try{await pipe(m.msgs,{...m.opts,streamer,stopping_criteria:sc});post({type:'done',rid:m.rid})}
   catch(e){post({type:'err',rid:m.rid,msg:String(e.message||e)})}
 }
+let vproc=null,vmodel=null;
+async function vload(m){
+  const files={};
+  const cb=p=>{if(p.file&&p.total)files[p.file]={l:p.loaded||0,t:p.total};let l=0,t=0;for(const k in files){l+=files[k].l;t+=files[k].t}post({type:'vprogress',p:t?l/t:0})};
+  try{
+    vproc=await TL.AutoProcessor.from_pretrained(m.id,{progress_callback:cb});
+    let last=null;
+    for(const dev of m.devs){
+      try{
+        if(dev==='webgpu'&&!self.navigator.gpu)continue;
+        vmodel=await TL.AutoModelForVision2Seq.from_pretrained(m.id,{dtype:{embed_tokens:'fp16',vision_encoder:'q4',decoder_model_merged:'q4'},device:dev,progress_callback:cb});
+        post({type:'vloaded',dev});return;
+      }catch(e){last=e}
+    }
+    post({type:'vfail',msg:String(last&&last.message||'unknown')});
+  }catch(e){post({type:'vfail',msg:String(e.message||e)})}
+}
+async function vcap(m){
+  sc=new TL.InterruptableStoppingCriteria();
+  try{
+    const image=await TL.load_image(m.image);
+    const messages=[{role:'user',content:[{type:'image'},{type:'text',text:m.prompt}]}];
+    const text=vproc.apply_chat_template(messages,{add_generation_prompt:true});
+    const inputs=await vproc(text,[image],{do_image_splitting:false});
+    const streamer=new TL.TextStreamer(vproc.tokenizer,{skip_prompt:true,skip_special_tokens:true,callback_function:t=>post({type:'vtok',rid:m.rid,t})});
+    await vmodel.generate({...inputs,max_new_tokens:m.max||300,do_sample:false,streamer,stopping_criteria:sc});
+    post({type:'vdone',rid:m.rid});
+  }catch(e){post({type:'verr',rid:m.rid,msg:String(e.message||e)})}
+}
 self.onmessage=e=>{
   const m=e.data;
+  if(m.type==='vload'){q=q.then(()=>vload(m));return}
+  if(m.type==='vcap'){q=q.then(()=>vcap(m));return}
   if(m.type==='stop'){try{sc&&sc.interrupt()}catch(x){}return}
   if(m.type==='load'){q=q.then(()=>load(m));return}
   if(m.type==='gen'){q=q.then(()=>gen(m))}
@@ -1193,6 +1224,28 @@ function ensureEngine(){
   let w;try{w=getWorker()}catch(e){return Promise.reject(qErr('تعذر تشغيل المحرك داخل التطبيق.'))}
   const h={id};h.p=new Promise((ok,no)=>{h.ok=ok;h.no=no});h.p.catch(()=>{});
   WLOAD=h;w.postMessage({type:'load',id,tries});return h.p;
+}
+const VLMODELS=[['onnx-community/SmolVLM-256M-Instruct','SmolVLM 256M — أخف شي (للجوالات الضعيفة)'],['onnx-community/SmolVLM-500M-Instruct','SmolVLM 500M — أدق وأبطأ']];
+const vModel=()=>{const m=store.get('vmodel','onnx-community/SmolVLM-256M-Instruct');return VLMODELS.some(x=>x[0]===m)?m:VLMODELS[0][0]};
+/* قراءة الصورة محليًا: نموذج رؤية صغير يوصف الصورة، وبعدها Qwen3 يجاوب عليها بالعربي */
+function captionImage(dataUrl,user,onStatus){
+  return new Promise((ok,no)=>{
+    try{W&&W.terminate()}catch(e){}W=null;ENGID='';WLOAD=null;   // نحرر الذاكرة قبل تشغيل نموذج الرؤية
+    let w;try{w=new Worker(URL.createObjectURL(new Blob([WORKER_SRC],{type:'text/javascript'})),{type:'module'})}catch(e){return no(qErr('تعذر تشغيل نموذج قراءة الصور.'))}
+    const rid=uid();let acc='',done=false;
+    const fin=(err,v)=>{if(done)return;done=true;user&&user.removeEventListener('abort',onAb);try{w.terminate()}catch(e){}err?no(err):ok(v)};
+    const onAb=()=>{const u=new Error('user');u.user=true;fin(u)};
+    user&&user.addEventListener('abort',onAb);
+    w.onerror=()=>fin(qErr('تعذر تشغيل نموذج قراءة الصور. أول مرة تحتاج نت.'));
+    w.onmessage=e=>{
+      const m=e.data;
+      if(m.type==='vprogress'){onStatus&&onStatus('⏳ جاري تحميل نموذج قراءة الصور (أول مرة بس)… '+Math.round(m.p*100)+'%')}
+      else if(m.type==='vfail')fin(qErr('فشل تحميل نموذج قراءة الصور: '+String(m.msg).slice(0,140)));
+      else if(m.type==='vloaded'){onStatus&&onStatus('⏳ جاري قراءة الصورة…');w.postMessage({type:'vcap',rid,image:dataUrl,max:300,prompt:'Describe this image in detail. Include any visible text, objects, people, colors and the overall scene.'})}
+      else if(m.rid===rid){if(m.type==='vtok')acc+=m.t;else if(m.type==='vdone')fin(null,acc.trim());else if(m.type==='verr')fin(qErr('خطأ بقراءة الصورة: '+String(m.msg).slice(0,140)))}
+    };
+    w.postMessage({type:'vload',id:vModel(),devs:store.get('qdev','')==='wasm'?['wasm']:['webgpu','wasm']});
+  });
 }
 const stripThink=s=>s.replace(/<think>[\s\S]*?<\/think>/g,'').replace(/<think>[\s\S]*$/,'').replace(/^\s+/,'');
 async function localChat(messages,onDelta,user,mode,opt={}){
@@ -1299,10 +1352,17 @@ doText=async function(c,lastU,a,intent){
     }
     const out=await apiChat(api,msgs,onD,ctrl.signal,{});a.content=out||a.content;return;
   }
-  if(intent==='vision')throw qErr('Qwen3 المحلي نموذج نصي وما يشوف الصور. من الإعدادات فعّل «API» واختر نموذج يدعم الصور، أو اكتب شنو تريد تعدّل بالصورة.');
   const sys={role:'system',content:buildSystem()};
   let used=sys.content.length;const keep=[];
   for(let i=hist.length-1;i>=0;i--){if(!hist[i].content)continue;const n=hist[i].content.length;if(keep.length&&used+n>12000)break;used+=n;keep.unshift({role:hist[i].role,content:hist[i].content.slice(0,8000)})}
+  if(intent==='vision'){
+    const caps=[];
+    for(const id of(lastU.imgs||[]).slice(0,2)){const d=await mGet(id);if(typeof d==='string')caps.push(await captionImage(d,ctrl.signal,onD))}
+    if(!caps.length)throw qErr('ما كدرت أقرأ الصورة.');
+    const q=(lastU.content||'').trim()||'اوصف لي الصورة وشنو مكتوب بيها.';
+    const msg='[وصف الصورة من نموذج الرؤية (بالإنجليزي، قد يكون ناقص):\n'+caps.map((c,i)=>(i+1)+') '+c).join('\n')+']\n\nسؤال المستخدم: '+q+'\n(جاوب بنفس لغة المستخدم اعتمادًا على الوصف، وإذا الوصف ما يكفي قول ذلك.)';
+    if(keep.length&&keep[keep.length-1].role==='user')keep[keep.length-1].content=msg;else keep.push({role:'user',content:msg});
+  }
   const out=await localChat([sys,...keep],onD,ctrl.signal,intent);
   a.content=out||a.content;
 };
@@ -1444,6 +1504,7 @@ openSettings=function(){
    '<select class="srch" id="qSel">'+QMODELS.map(m=>'<option value="'+m[0]+'"'+(m[0]===cur?' selected':'')+'>'+esc(m[1])+'</option>').join('')+'</select>'+
    '<div class="row2"><button class="btn2 p" id="qLoad">'+(W&&ENGID===cur?'النموذج جاهز ✓':'تحميل النموذج الآن')+'</button></div>'+
    '<div id="qStat" style="color:var(--mut);font-size:12.5px;margin:8px 6px 0;line-height:1.8">يتحمل مرة وحدة (يحتاج نت) وينحفظ بالجهاز، وبعدها يشتغل بدون نت وبدون سيرفر.</div>'+
+   '<div class="fl" style="margin-top:14px">— قراءة الصور محليًا (بدون API) —</div><select class="srch" id="vSel">'+VLMODELS.map(m=>'<option value="'+m[0]+'"'+(m[0]===vModel()?' selected':'')+'>'+esc(m[1])+'</option>').join('')+'</select><div style="color:var(--mut);font-size:12.5px;margin:6px 6px 0;line-height:1.7">يتحمل أول مرة تسأل عن صورة، وبعدها بدون نت. قراءته للعربي ضعيفة، والأفضل API فيه رؤية للدقة.</div>'+
    '<div class="fl" style="margin-top:14px">— API للدردشة —</div>'+apiFields('ch',pv.chat,PRESETS_C,'مثال: qwen/qwen3-235b-a22b')+
    H('الصور — مصدر المولّد')+srcSel('imSrc',pv.img.src,[['server','Qwen-Image (سيرفر على جهازك)'],['api','API (مزوّد صور)']])+
    '<div class="fl" style="margin-top:14px">— سيرفر Qwen-Image —</div><input class="srch" id="imBase" dir="ltr" value="'+esc(ic2.base)+'" placeholder="http://192.168.1.5:8000">'+
@@ -1466,7 +1527,7 @@ $('#sheet').addEventListener('change',e=>{
 $('#sheet').addEventListener('click',async e=>{
   const t=e.target.closest('#qLoad,#imTest,#qSave');if(!t)return;
   if(t.id==='qSave'){
-    store.set('qmodel2',$('#qSel').value);
+    store.set('qmodel2',$('#qSel').value);store.set('vmodel',$('#vSel').value);
     store.set('img',{base:$('#imBase').value.trim(),steps:+$('#imSt').value,cfg:+$('#imCfg').value,enh:$('#imEn').checked});
     store.set('prov2',{
       chat:{src:$('#chSrc').value,preset:$('#chPre').value,base:$('#chBase').value.trim(),key:cleanKey($('#chKey').value),model:$('#chModel').value.trim()},
