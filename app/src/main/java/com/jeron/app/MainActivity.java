@@ -8,6 +8,10 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
+import android.media.ExifInterface;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
@@ -28,11 +32,15 @@ import android.webkit.WebViewClient;
 
 import androidx.webkit.WebViewAssetLoader;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
 
 public class MainActivity extends Activity {
     private static final String HOME = "https://appassets.androidplatform.net/assets/index.html";
     private static final int REQ_FILE = 7;
+    private static final int REQ_IMG = 8;
     private WebView web;
     private ValueCallback<Uri[]> fileCb;
     private static int crashes = 0;
@@ -98,6 +106,21 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
+        if (req == REQ_IMG) {
+            if (res != RESULT_OK || data == null) return;
+            final ArrayList<Uri> uris = new ArrayList<>();
+            if (data.getClipData() != null) {
+                for (int i = 0; i < data.getClipData().getItemCount(); i++) uris.add(data.getClipData().getItemAt(i).getUri());
+            } else if (data.getData() != null) uris.add(data.getData());
+            new Thread(() -> {
+                for (Uri u : uris) {
+                    final String d = toDataUrl(u);
+                    if (d == null) continue;
+                    runOnUiThread(() -> web.evaluateJavascript("window.onPickedImage&&window.onPickedImage('" + d + "')", null));
+                }
+            }).start();
+            return;
+        }
         if (req == REQ_FILE && fileCb != null) {
             fileCb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, data));
             fileCb = null;
@@ -119,7 +142,54 @@ public class MainActivity extends Activity {
         });
     }
 
+    private String toDataUrl(Uri u) {
+        try {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inJustDecodeBounds = true;
+            try (InputStream in = getContentResolver().openInputStream(u)) { BitmapFactory.decodeStream(in, null, o); }
+            int mx = Math.max(o.outWidth, o.outHeight), ss = 1;
+            while (mx / ss > 3200) ss *= 2;
+            o = new BitmapFactory.Options();
+            o.inSampleSize = ss;
+            Bitmap b;
+            try (InputStream in = getContentResolver().openInputStream(u)) { b = BitmapFactory.decodeStream(in, null, o); }
+            if (b == null) return null;
+            int rot = 0;
+            try (InputStream in = getContentResolver().openInputStream(u)) {
+                int ori = new ExifInterface(in).getAttributeInt(ExifInterface.TAG_ORIENTATION, 1);
+                if (ori == 6) rot = 90; else if (ori == 3) rot = 180; else if (ori == 8) rot = 270;
+            } catch (Exception ignored) {}
+            int m = Math.max(b.getWidth(), b.getHeight());
+            float k = m > 1568 ? 1568f / m : 1f;
+            if (k != 1f || rot != 0) {
+                Matrix mt = new Matrix();
+                mt.postScale(k, k);
+                mt.postRotate(rot);
+                Bitmap n = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), mt, true);
+                if (n != b) b.recycle();
+                b = n;
+            }
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            b.compress(Bitmap.CompressFormat.JPEG, 88, bo);
+            b.recycle();
+            return "data:image/jpeg;base64," + Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP);
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
     class Bridge {
+        @JavascriptInterface
+        public void pickImage() {
+            runOnUiThread(() -> {
+                Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                i.setType("image/*");
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                try { startActivityForResult(Intent.createChooser(i, "اختر صورة"), REQ_IMG); } catch (Exception ignored) {}
+            });
+        }
+
         @JavascriptInterface
         public void keepAwake(final boolean on) {
             runOnUiThread(() -> {

@@ -1228,24 +1228,95 @@ detectIntent=function(text,hasImg,prevWasMedia){
   if(CODE.test(t))return 'code';
   return 'chat';
 };
+/* ---- مزوّدات API (دردشة + صور): أي endpoint متوافق مع OpenAI ---- */
+const PRESETS_C={openrouter:['OpenRouter','https://openrouter.ai/api/v1'],deepinfra:['DeepInfra','https://api.deepinfra.com/v1/openai'],together:['Together.ai','https://api.together.xyz/v1'],groq:['Groq','https://api.groq.com/openai/v1'],custom:['مخصص (أي endpoint متوافق مع OpenAI)','']};
+const PRESETS_I={openrouter:PRESETS_C.openrouter,together:PRESETS_C.together,deepinfra:PRESETS_C.deepinfra,pollinations:['Pollinations (مجاني، بدون مفتاح)','https://image.pollinations.ai'],custom:PRESETS_C.custom};
+const PD={chat:{src:'local',preset:'openrouter',base:PRESETS_C.openrouter[1],key:'',model:''},img:{src:'server',preset:'openrouter',base:PRESETS_C.openrouter[1],key:'',model:''}};
+const PV=()=>{const p=store.get('prov2',{})||{};return{chat:{...PD.chat,...(p.chat||{})},img:{...PD.img,...(p.img||{})}}};
+const cleanBase=b=>{b=String(b||'').trim();if(!b)return '';if(!/^https?:\/\//i.test(b))b='https://'+b;return b.replace(/\/(chat\/completions|images\/generations)\/?$/i,'').replace(/\/+$/,'')};
+const cleanKey=k=>String(k||'').replace(/\s+/g,'').replace(/^Bearer/i,'');
+const mkCfg=p=>({base:cleanBase(p.base),key:cleanKey(p.key),model:String(p.model||'').trim()});
+function apiHdr(c,json=true){const h={};if(json)h['Content-Type']='application/json';if(c.key)h['Authorization']='Bearer '+c.key;if(/openrouter\.ai/.test(c.base)){h['HTTP-Referer']=origin();h['X-Title']='Jeron'}return h}
+const chatApi=()=>{const c=PV().chat;return c.src==='api'?mkCfg(c):null};
+async function apiFailMsg(res){let m='';try{const j=await res.clone().json();m=(j.error&&(j.error.message||j.error))||j.message||j.detail||''}catch(e){try{m=(await res.text()).slice(0,200)}catch(x){}}
+  return qErr('خطأ من المزوّد ('+res.status+'): '+String(typeof m==='string'?m:JSON.stringify(m)).slice(0,220))}
+async function apiChat(c,messages,onDelta,user,opt={}){
+  if(!c.base||!c.model)throw qErr('ناقص بإعدادات الـ API: '+[!c.base&&'Base URL',!c.model&&'Model ID'].filter(Boolean).join(' و ')+'. افتح الإعدادات واكمله.');
+  const rp=!!curPersona()&&opt.mode!=='enh',s=rpS();
+  let full='',msgs=messages;
+  for(let round=0;round<5;round++){
+    let acc='',finish='';
+    try{
+      const body={model:c.model,messages:msgs,stream:true};
+      if(rp){body.temperature=+s.temp;body.top_p=+s.top_p;if(+s.rep)body.frequency_penalty=+s.rep}
+      if(opt.max)body.max_tokens=opt.max;
+      const res=await fetch(c.base+'/chat/completions',{method:'POST',headers:apiHdr(c),signal:user,body:JSON.stringify(body)});
+      if(!res.ok)throw await apiFailMsg(res);
+      if(!/event-stream/.test(res.headers.get('content-type')||'')){
+        const j=await res.json();if(j.error)throw qErr('خطأ من المزوّد: '+String(j.error.message||'').slice(0,200));
+        acc=j.choices?.[0]?.message?.content||'';finish=j.choices?.[0]?.finish_reason||'';onDelta(stripThink(full+acc));
+      }else{
+        const rd=res.body.getReader(),dec=new TextDecoder();let buf='';
+        for(;;){
+          const{done,value}=await rd.read();if(done)break;
+          buf+=dec.decode(value,{stream:true});let i;
+          while((i=buf.indexOf('\n'))>=0){
+            const line=buf.slice(0,i).trim();buf=buf.slice(i+1);
+            if(!line.startsWith('data:'))continue;const d=line.slice(5).trim();if(d==='[DONE]')continue;
+            let j;try{j=JSON.parse(d)}catch(e){continue}
+            if(j.error){if(acc)break;throw qErr('خطأ من المزوّد: '+String(j.error.message||'').slice(0,200))}
+            const ch=j.choices?.[0]||{};if(ch.finish_reason)finish=ch.finish_reason;
+            const dl=ch.delta&&ch.delta.content;if(dl){acc+=dl;const v=stripThink(full+acc);if(v)onDelta(v)}
+          }
+        }
+      }
+    }catch(e){
+      if(user?.aborted){if((full+acc).trim())return stripThink(full+acc).trim();const u=new Error('user');u.user=true;throw u}
+      if(acc.trim()){full+=acc;break}
+      throw e.userMsg?e:qErr('ما كدرت أوصل للمزوّد: '+String(e.message||e).slice(0,160)+' (تأكد من النت والـ Base URL)');
+    }
+    full+=acc;
+    if(finish!=='length'||!acc.trim()||rp)break;
+    msgs=messages.concat([{role:'assistant',content:full},{role:'user',content:'Continue exactly where you left off. Do not repeat anything — output only the rest.'}]);
+  }
+  const out=stripThink(full).trim();
+  if(!out)throw qErr('المزوّد رجّع رد فاضي. تأكد من Model ID.');
+  return out;
+}
 doText=async function(c,lastU,a,intent){
-  if(intent==='vision')throw qErr('Qwen3 نموذج نصي وما يشوف الصور. اكتب وياها شنو تريد تعدّل (مثلاً: بدّل الخلفية لغروب) وأشغّل Qwen-Image-Edit.');
-  const hist=c.msgs.filter(m=>m!==a&&m.content).slice(-24);
+  const api=chatApi();
+  const hist=c.msgs.filter(m=>m!==a&&(m.content||(m.imgs&&m.imgs.length))).slice(-24);
+  const onD=acc=>{a.content=acc;const el=$('#msgs .m.a:last-child .md');if(el){el.innerHTML=md(acc);if(stick)scrollEnd(true)}else renderAll()};
+  if(api){
+    const msgs=[{role:'system',content:buildSystem()}];
+    for(let i=0;i<hist.length;i++){
+      const m=hist[i];
+      if(m.role==='user'&&m.imgs&&m.imgs.length&&hist.length-i<=4){
+        const parts=[{type:'text',text:m.content||'ما هذا؟'}];
+        for(const id of m.imgs){const d=await mGet(id);if(typeof d==='string')parts.push({type:'image_url',image_url:{url:d}})}
+        msgs.push({role:'user',content:parts});
+      }else if(m.content)msgs.push({role:m.role,content:m.content});
+    }
+    const out=await apiChat(api,msgs,onD,ctrl.signal,{});a.content=out||a.content;return;
+  }
+  if(intent==='vision')throw qErr('Qwen3 المحلي نموذج نصي وما يشوف الصور. من الإعدادات فعّل «API» واختر نموذج يدعم الصور، أو اكتب شنو تريد تعدّل بالصورة.');
   const sys={role:'system',content:buildSystem()};
   let used=sys.content.length;const keep=[];
-  for(let i=hist.length-1;i>=0;i--){const n=hist[i].content.length;if(keep.length&&used+n>12000)break;used+=n;keep.unshift({role:hist[i].role,content:hist[i].content.slice(0,8000)})}
-  const out=await localChat([sys,...keep],acc=>{
-    a.content=acc;const el=$('#msgs .m.a:last-child .md');
-    if(el){el.innerHTML=md(acc);if(stick)scrollEnd(true)}else renderAll();
-  },ctrl.signal,intent);
+  for(let i=hist.length-1;i>=0;i--){if(!hist[i].content)continue;const n=hist[i].content.length;if(keep.length&&used+n>12000)break;used+=n;keep.unshift({role:hist[i].role,content:hist[i].content.slice(0,8000)})}
+  const out=await localChat([sys,...keep],onD,ctrl.signal,intent);
   a.content=out||a.content;
 };
 enhancePrompt=async function(kind,text,user){
   if(!text||!imgCfg().enh)return text;
   const sys=kind==='edit'?'Rewrite the user request as ONE concise, clear English instruction for an image-editing model. Keep any text that must appear in the image exactly as written. Output only the instruction.'
     :'Rewrite the user request as ONE vivid, detailed English prompt for a text-to-image model: subject, composition, style, lighting, colors, detail. Keep any text that must appear in the image exactly as written. Output only the prompt.';
-  try{const r=await localChat([{role:'system',content:sys},{role:'user',content:text}],()=>{},user,'enh',{max:350,temp:.6});return r||text}
-  catch(e){if(user?.aborted)throw e;dbg('enhance failed',String(e.message||e));return text}
+  const msgs=[{role:'system',content:sys},{role:'user',content:text}];
+  try{
+    const api=chatApi();
+    if(api)return (await apiChat(api,msgs,()=>{},user,{max:400,mode:'enh'}))||text;
+    if(W&&ENGID===qModel())return (await localChat(msgs,()=>{},user,'enh',{max:350,temp:.6}))||text;
+    return text;
+  }catch(e){if(user?.aborted)throw e;dbg('enhance failed',String(e.message||e));return text}
 };
 
 /* ---- Qwen-Image (سيرفر محلي: qwen_image_server.py) ---- */
@@ -1268,8 +1339,58 @@ async function postImg(path,body,ms){
     throw qErr('ما كدرت أوصل لسيرفر Qwen-Image على '+base+' . شغّل qwen_image_server.py وتأكد من الرابط بالإعدادات.');
   }finally{clearTimeout(t);un()}
 }
+async function blobToDataURL(b){return new Promise((ok,no)=>{const f=new FileReader();f.onload=()=>ok(f.result);f.onerror=no;f.readAsDataURL(b)})}
+async function urlToStored(url,user){
+  try{const r=await fetch(url,{signal:user});if(!r.ok)throw new Error('http '+r.status);const b=await r.blob();if(!/^image\//.test(b.type)||b.size<500)throw new Error('bad image');return await blobToDataURL(b)}
+  catch(e){if(user?.aborted)throw e;return url}
+}
+function pickImages(j){
+  const out=[];for(const it of(j&&j.data)||[]){if(it.b64_json)out.push('data:image/png;base64,'+it.b64_json);else if(it.url)out.push(it.url)}
+  return out;
+}
+async function apiImage(P,prompt,refs,w,h,user){
+  const c=mkCfg(P);
+  if(P.preset==='pollinations'||/pollinations\.ai/.test(c.base)){
+    if(refs.length)throw qErr('Pollinations ما يدعم تعديل الصور. اختر مزوّد ثاني للتعديل.');
+    const url='https://image.pollinations.ai/prompt/'+encodeURIComponent(prompt.slice(0,1500))+'?model='+encodeURIComponent(c.model||'flux')+'&width='+w+'&height='+h+'&nologo=true&seed='+Math.floor(Math.random()*1e9);
+    return [await urlToStored(url,user)];
+  }
+  if(!c.base||!c.model)throw qErr('ناقص بإعدادات API الصور: '+[!c.base&&'Base URL',!c.model&&'Model ID'].filter(Boolean).join(' و ')+'.');
+  const net=e=>{if(user?.aborted){const u=new Error('user');u.user=true;return u}return e.userMsg?e:qErr('ما كدرت أوصل لمزوّد الصور: '+String(e.message||e).slice(0,160))};
+  try{
+    if(/openrouter\.ai/.test(c.base)){
+      const content=refs.length?[{type:'text',text:prompt}].concat(refs.map(u=>({type:'image_url',image_url:{url:u}}))):prompt;
+      let res=null;
+      for(const mod of[['image','text'],['image']]){
+        res=await fetch(c.base+'/chat/completions',{method:'POST',headers:apiHdr(c),signal:user,body:JSON.stringify({model:c.model,messages:[{role:'user',content}],modalities:mod})});
+        if(res.ok)break;
+      }
+      if(!res.ok)throw await apiFailMsg(res);
+      const j=await res.json();if(j.error)throw qErr('خطأ من المزوّد: '+String(j.error.message||'').slice(0,200));
+      const urls=parseImages(j);if(!urls.length)throw qErr('المزوّد ما رجّع صورة. تأكد إن النموذج يولّد صور.');
+      return urls;
+    }
+    if(refs.length){
+      const fd=new FormData();fd.append('model',c.model);fd.append('prompt',prompt);fd.append('n','1');
+      for(const u of refs)fd.append('image',await (await fetch(u)).blob(),'image.jpg');
+      const res=await fetch(c.base+'/images/edits',{method:'POST',headers:apiHdr(c,false),signal:user,body:fd});
+      if(!res.ok)throw await apiFailMsg(res);
+      const out=pickImages(await res.json());if(!out.length)throw qErr('المزوّد ما رجّع صورة.');return out;
+    }
+    const attempts=[{size:w+'x'+h,response_format:'b64_json'},{size:w+'x'+h},{}];
+    let res=null;
+    for(const extra of attempts){
+      res=await fetch(c.base+'/images/generations',{method:'POST',headers:apiHdr(c),signal:user,body:JSON.stringify({model:c.model,prompt,n:1,...extra})});
+      if(res.ok||res.status===401||res.status===402||res.status===429)break;
+    }
+    if(!res.ok)throw await apiFailMsg(res);
+    const out=pickImages(await res.json());if(!out.length)throw qErr('المزوّد ما رجّع صورة.');
+    return await Promise.all(out.map(u=>/^data:/.test(u)?u:urlToStored(u,user)));
+  }catch(e){throw net(e)}
+}
 doImage=async function(c,lastU,a,prevMedia){
-  if(!imgBase())throw qErr('حط رابط سيرفر Qwen-Image بالإعدادات أول.');
+  const P=PV().img,useApi=P.src==='api';
+  if(!useApi&&!imgBase())throw qErr('حط رابط سيرفر Qwen-Image أو فعّل API الصور من الإعدادات.');
   let refs=[];
   for(const id of lastU.imgs||[]){const d=await mGet(id);if(typeof d==='string'&&/^data:/.test(d))refs.push(d)}
   if(!refs.length&&prevMedia){
@@ -1284,20 +1405,20 @@ doImage=async function(c,lastU,a,prevMedia){
   const [w,h]=portrait?ASPECT.pt:wide?ASPECT.ls:ASPECT.sq;
   const cfg=imgCfg();
   const prompt=await enhancePrompt(refs.length?'edit':'image',raw,ctrl.signal);
-  let j;const t0=Date.now(),tick=setInterval(()=>{const el=$('#msgs .m.a:last-child .gs');if(el){const sec=Math.floor((Date.now()-t0)/1000);el.textContent='جاري إنشاء الصورة… '+Math.floor(sec/60)+':'+String(sec%60).padStart(2,'0')}},1000);
+  const t0=Date.now(),tick=setInterval(()=>{const el=$('#msgs .m.a:last-child .gs');if(el){const sec=Math.floor((Date.now()-t0)/1000);el.textContent='جاري إنشاء الصورة… '+Math.floor(sec/60)+':'+String(sec%60).padStart(2,'0')}},1000);
+  let stored=[];
   try{
-  if(refs.length)j=await postImg('/v1/images/edits',{prompt,image:refs,negative_prompt:' ',num_inference_steps:Math.min(+cfg.steps||40,40),true_cfg_scale:+cfg.cfg||4,response_format:'b64_json'},120*60000);
-  else j=await postImg('/v1/images/generations',{prompt,negative_prompt:neg||' ',size:w+'x'+h,n:1,num_inference_steps:+cfg.steps||50,true_cfg_scale:+cfg.cfg||4,response_format:'b64_json'},120*60000);
+    if(useApi)stored=await apiImage(P,prompt,refs,w,h,ctrl.signal);
+    else{
+      let j;
+      if(refs.length)j=await postImg('/v1/images/edits',{prompt,image:refs,negative_prompt:' ',num_inference_steps:Math.min(+cfg.steps||40,40),true_cfg_scale:+cfg.cfg||4,response_format:'b64_json'},120*60000);
+      else j=await postImg('/v1/images/generations',{prompt,negative_prompt:neg||' ',size:w+'x'+h,n:1,num_inference_steps:+cfg.steps||30,true_cfg_scale:+cfg.cfg||4,response_format:'b64_json'},120*60000);
+      stored=pickImages(j);
+    }
   }finally{clearInterval(tick)}
-  const items=(j&&j.data)||[];
-  if(!items.length)throw qErr('السيرفر ما رجّع صورة.');
-  for(const it of items){
-    const u=it.b64_json?'data:image/png;base64,'+it.b64_json:it.url;if(!u)continue;
-    const id='m'+uid();await mPut(id,u);a.media.push({type:'image',id});
-  }
-  if(!a.media.length)throw qErr('السيرفر ما رجّع صورة.');
+  if(!stored.length)throw qErr('ما رجعت صورة.');
+  for(const u of stored){const id='m'+uid();await mPut(id,u);a.media.push({type:'image',id})}
 };
-
 const _sb=setBusy;setBusy=function(b){_sb(b);try{AB&&AB.keepAwake&&AB.keepAwake(!!b)}catch(e){}};
 /* ---- واجهة بدون الصوت/الفيديو/Whisper ---- */
 SUGG.length=0;
@@ -1306,39 +1427,57 @@ SUGG.push(['code','اكتب لي كود','اكتب لي صفحة HTML لبطاق
 window.onVoice=null;
 
 /* ---- الإعدادات ---- */
+const selOpts=(P,cur)=>Object.keys(P).map(k=>'<option value="'+k+'"'+(k===cur?' selected':'')+'>'+esc(P[k][0])+'</option>').join('');
+const apiFields=(pre,P,PR,hint)=>'<div class="fl">المزوّد</div><select class="srch" id="'+pre+'Pre">'+selOpts(PR,P.preset)+'</select>'+
+  '<div class="fl">Base URL</div><input class="srch" id="'+pre+'Base" dir="ltr" value="'+esc(P.base)+'" placeholder="https://.../v1">'+
+  '<div class="fl">API Key</div><input class="srch" id="'+pre+'Key" type="password" dir="ltr" autocomplete="off" value="'+esc(P.key)+'" placeholder="sk-...">'+
+  '<div class="fl">Model ID</div><input class="srch" id="'+pre+'Model" dir="ltr" value="'+esc(P.model)+'" placeholder="'+esc(hint)+'">';
+const srcSel=(id,cur,opts)=>'<select class="srch" id="'+id+'">'+opts.map(o=>'<option value="'+o[0]+'"'+(o[0]===cur?' selected':'')+'>'+esc(o[1])+'</option>').join('')+'</select>';
 openSettings=function(){
   closeDrawer();
-  const s=rpS(),ic2=imgCfg(),cur=qModel();
+  const s=rpS(),ic2=imgCfg(),cur=qModel(),pv=PV();
+  const H=t=>'<div class="fl" style="margin-top:26px;font-weight:600;color:var(--tx)">'+t+'</div>';
   openSheet('<h3>الإعدادات</h3>'+
    '<div style="color:var(--mut);font-size:13.5px;margin:0 6px 8px">تعليمات مخصصة (تنطبق على كل المحادثات)</div><textarea class="area" id="ciIn" placeholder="مثال: جاوبني بالعراقي وباختصار"></textarea><div class="row2"><button class="btn2 p" id="ciSave">حفظ</button></div>'+
-   '<div class="fl" style="margin-top:24px;font-weight:600;color:var(--tx)">الدردشة — Qwen3 (داخل التطبيق، بدون نت)</div>'+
+   H('الدردشة — مصدر النموذج')+srcSel('chSrc',pv.chat.src,[['local','Qwen3 محلي (داخل التطبيق، بدون نت)'],['api','API (نموذج قوي من مزوّد)']])+
+   '<div class="fl" style="margin-top:14px">— Qwen3 المحلي —</div>'+
    '<select class="srch" id="qSel">'+QMODELS.map(m=>'<option value="'+m[0]+'"'+(m[0]===cur?' selected':'')+'>'+esc(m[1])+'</option>').join('')+'</select>'+
    '<div class="row2"><button class="btn2 p" id="qLoad">'+(W&&ENGID===cur?'النموذج جاهز ✓':'تحميل النموذج الآن')+'</button></div>'+
-   '<div id="qStat" style="color:var(--mut);font-size:12.5px;margin:8px 6px 0;line-height:1.8">يتحمل مرة وحدة (يحتاج نت) وينحفظ بالجهاز، وبعدها يشتغل بدون نت وبدون سيرفر. إذا كرت جهازك ما يدعم WebGPU يشتغل تلقائيًا على المعالج (أبطأ).</div>'+
-   '<div class="fl" style="margin-top:24px;font-weight:600;color:var(--tx)">الصور — Qwen-Image</div>'+
-   '<div class="fl">رابط السيرفر المحلي</div><input class="srch" id="imBase" dir="ltr" value="'+esc(ic2.base)+'" placeholder="http://localhost:8000">'+
+   '<div id="qStat" style="color:var(--mut);font-size:12.5px;margin:8px 6px 0;line-height:1.8">يتحمل مرة وحدة (يحتاج نت) وينحفظ بالجهاز، وبعدها يشتغل بدون نت وبدون سيرفر.</div>'+
+   '<div class="fl" style="margin-top:14px">— API للدردشة —</div>'+apiFields('ch',pv.chat,PRESETS_C,'مثال: qwen/qwen3-235b-a22b')+
+   H('الصور — مصدر المولّد')+srcSel('imSrc',pv.img.src,[['server','Qwen-Image (سيرفر على جهازك)'],['api','API (مزوّد صور)']])+
+   '<div class="fl" style="margin-top:14px">— سيرفر Qwen-Image —</div><input class="srch" id="imBase" dir="ltr" value="'+esc(ic2.base)+'" placeholder="http://192.168.1.5:8000">'+
    R('imSt','عدد الخطوات',ic2.steps,10,60,1)+R('imCfg','قوة الالتزام بالوصف (CFG)',ic2.cfg,1,8,.5)+
-   '<label class="chk"><input type="checkbox" id="imEn"'+(ic2.enh?' checked':'')+'> تحسين/ترجمة الوصف للإنجليزي بـ Qwen3 قبل التوليد</label>'+
    '<div class="row2"><button class="btn2" id="imTest">فحص الاتصال</button></div><div id="imStat" style="color:var(--mut);font-size:12.5px;margin:8px 6px 0"></div>'+
-   '<div class="fl" style="margin-top:24px;font-weight:600;color:var(--tx)">الشخصيات (رولبلاي)</div>'+
+   '<div class="fl" style="margin-top:14px">— API للصور —</div>'+apiFields('ia',pv.img,PRESETS_I,'مثال: black-forest-labs/flux-1.1-pro')+
+   '<label class="chk"><input type="checkbox" id="imEn"'+(ic2.enh?' checked':'')+'> حسّن/ترجم الوصف للإنجليزي قبل التوليد (بنموذج الدردشة)</label>'+
+   H('الشخصيات (رولبلاي)')+
    R('rpT','الإبداعية (Temperature)',s.temp,0,2,.05)+R('rpP','Top P',s.top_p,.1,1,.05)+R('rpF','منع التكرار',s.rep,0,2,.1)+
    '<div class="fl">أقصى طول للرد (توكِن)</div><input class="srch" id="rpM" type="number" dir="ltr" value="'+s.max+'">'+
    '<div class="row2"><button class="btn2 p" id="qSave">حفظ</button><button class="btn2" id="expChat">تصدير المحادثة</button></div>');
   $('#ciIn').value=store.get('ci','');
 };
 $('#btnSettings').onclick=openSettings;
+$('#sheet').addEventListener('change',e=>{
+  const id=e.target.id;
+  if(id==='chPre'){const u=PRESETS_C[e.target.value][1];if(u)$('#chBase').value=u}
+  if(id==='iaPre'){const u=PRESETS_I[e.target.value][1];if(u)$('#iaBase').value=u}
+});
 $('#sheet').addEventListener('click',async e=>{
   const t=e.target.closest('#qLoad,#imTest,#qSave');if(!t)return;
   if(t.id==='qSave'){
     store.set('qmodel2',$('#qSel').value);
     store.set('img',{base:$('#imBase').value.trim(),steps:+$('#imSt').value,cfg:+$('#imCfg').value,enh:$('#imEn').checked});
-    store.set('rp',{temp:+$('#rpT').value,top_p:+$('#rpP').value,rep:+$('#rpF').value,max:Math.max(64,Math.min(4000,+$('#rpM').value||700))});
+    store.set('prov2',{
+      chat:{src:$('#chSrc').value,preset:$('#chPre').value,base:$('#chBase').value.trim(),key:cleanKey($('#chKey').value),model:$('#chModel').value.trim()},
+      img:{src:$('#imSrc').value,preset:$('#iaPre').value,base:$('#iaBase').value.trim(),key:cleanKey($('#iaKey').value),model:$('#iaModel').value.trim()}});
+    store.set('rp',{temp:+$('#rpT').value,top_p:+$('#rpP').value,rep:+$('#rpF').value,max:Math.max(64,Math.min(100000,+$('#rpM').value||700))});
     toast('تم الحفظ');return;
   }
   if(t.id==='qLoad'){
     store.set('qmodel2',$('#qSel').value);
     const st=$('#qStat'),btn=t;btn.disabled=true;try{AB&&AB.keepAwake&&AB.keepAwake(true)}catch(e){}
-    onLoadP=r=>{st.textContent=(r.text||'')+' — '+Math.round(r.p*100)+'%'};
+    onLoadP=r=>{st.textContent=Math.round(r.p*100)+'% — '+(r.t||'')};
     try{await ensureEngine();st.textContent='جاهز. من هسه يشتغل بدون نت.';btn.textContent='النموذج جاهز ✓'}
     catch(err){st.textContent=err.userMsg||String(err.message||err)}
     onLoadP=null;btn.disabled=false;try{AB&&AB.keepAwake&&AB.keepAwake(false)}catch(e){}return;
@@ -1350,6 +1489,10 @@ $('#sheet').addEventListener('click',async e=>{
     catch(err){st.textContent='ما كدرت أوصل للسيرفر. تأكد إنه شغّال والرابط صحيح.'}
   }
 });
+window.onPickedImage=u=>{pend.push(u);renderChips();toast('تمت إضافة الصورة')};
+if(AB&&AB.pickImage)$('#btnAttach').onclick=()=>AB.pickImage();
+window.addEventListener('unhandledrejection',e=>dbg('unhandled',String(e.reason&&e.reason.message||e.reason)));
+window.addEventListener('error',e=>dbg('error',e.message));
 /* ---- offline: service worker ---- */
 try{if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol))navigator.serviceWorker.register('sw.js').catch(()=>{})}catch(e){}
 
